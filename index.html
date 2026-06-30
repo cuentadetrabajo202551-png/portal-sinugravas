@@ -495,6 +495,7 @@ tbody tr:hover{background:var(--gray-soft);}
       <div class="view" id="view-recursos"></div>
       <div class="view" id="view-certificado"></div>
       <div class="view" id="view-documentos"></div>
+      <div class="view" id="view-documentos-rh"></div>
       <div class="view" id="view-comunicados"></div>
       <div class="view" id="view-directorio"></div>
       <div class="view" id="view-perfil"></div>
@@ -698,7 +699,7 @@ function renderBellDropdown(){
 function emptyState(){
   return {users:[], disponibilidad:[], solicitudes:[], comunicados:[], directorio:[],
     certConfig:{firmante:'', cargoFirmante:'Representante Legal', nit:'', ciudad:'Montería'},
-    tarjetas:[], alertasRH:[]};
+    tarjetas:[], alertasRH:[], documentos:[]};
 }
 function empleadoFromRow(e, profile){
   return {
@@ -716,7 +717,7 @@ function empleadoFromRow(e, profile){
 }
 let state = emptyState();
 async function loadAppData(){
-  const [empRes, profRes, dispRes, solRes, comRes, dirRes, certRes, tarRes, alertRes] = await Promise.all([
+  const [empRes, profRes, dispRes, solRes, comRes, dirRes, certRes, tarRes, alertRes, docRes] = await Promise.all([
     sb.from('empleados').select('*'),
     sb.from('profiles').select('*'),
     sb.from('disponibilidad').select('*'),
@@ -726,6 +727,7 @@ async function loadAppData(){
     sb.from('cert_config').select('*').eq('id',1).maybeSingle(),
     sb.from('tarjetas').select('*'),
     sb.from('alertas_rh').select('*'),
+    sb.from('documentos').select('*'),
   ]);
 
   const profilesByEmpleado = {};
@@ -759,7 +761,12 @@ async function loadAppData(){
 
   const alertasRH = (alertRes.data||[]).map(a => ({ id:a.id, tipo:a.tipo, empleadoId:a.empleado_id, empleado:a.empleado, mensaje:a.mensaje, fecha:a.fecha, leido:a.leido }));
 
-  state = { users, disponibilidad, solicitudes, comunicados, directorio, certConfig, tarjetas, alertasRH };
+  const documentos = (docRes.data||[]).map(d => ({
+    id:d.id, empleadoId:d.empleado_id, nombre:d.nombre, icono:d.icono||'📄', storagePath:d.storage_path,
+    externalUrl:d.external_url, tipoArchivo:d.tipo_archivo, tamanoBytes:d.tamano_bytes, subidoPor:d.subido_por, createdAt:d.created_at
+  }));
+
+  state = { users, disponibilidad, solicitudes, comunicados, directorio, certConfig, tarjetas, alertasRH, documentos };
 }
 
 let currentUser = null;
@@ -878,6 +885,7 @@ const MENUS = {
     {id:'rh-registro', label:'Registro de estado', icon:'📋'},
     {id:'solicitudes', label:'Certificados', icon:'📄'},
     {id:'recursos', label:'Recursos', icon:'🧩'},
+    {id:'documentos-rh', label:'Documentos', icon:'📁'},
     {id:'comunicados', label:'Comunicados', icon:'📢'},
     {id:'directorio', label:'Directorio', icon:'📇'},
     {id:'perfil', label:'Mi perfil', icon:'⚙️'},
@@ -925,6 +933,7 @@ const RENDERERS = {
   'recursos': renderRecursos,
   'certificado': renderCertificado,
   'documentos': renderDocumentos,
+  'documentos-rh': renderDocumentosGenerales,
   'comunicados': renderComunicados,
   'directorio': renderDirectorio,
   'perfil': renderPerfil,
@@ -1353,21 +1362,126 @@ function descargarCertificadoPDF(id){
 
 /* =========================== EMPLEADO: DOCUMENTOS =========================== */
 function renderDocumentos(){
-  const docs = [
-    {icon:'📑',name:'Contrato'},{icon:'📘',name:'Reglamento'},{icon:'📖',name:'Manual'},
-    {icon:'📜',name:'Políticas'},{icon:'🎓',name:'Certificados'},{icon:'🪪',name:'Carnet'},
-    {icon:'🏥',name:'Formato EPS'},{icon:'🦺',name:'Formato ARL'},
-  ];
+  const docs = state.documentos.filter(d=>!d.empleadoId).sort((a,b)=>(a.nombre||'').localeCompare(b.nombre||''));
   document.getElementById('view-documentos').innerHTML = `
-    <div class="page-head"><h1>Mis documentos</h1><p>Documentos disponibles para consulta y descarga.</p></div>
+    <div class="page-head"><h1>Mis documentos</h1><p>Documentos generales disponibles para todos los empleados.</p></div>
+    ${docs.length ? `
     <div class="doc-grid">
       ${docs.map(d=>`
         <div class="doc-card">
-          <div class="di">${d.icon}</div><h5>${d.name}</h5>
-          <button class="btn btn-outline btn-sm btn-block" onclick="toast('Disponible próximamente desde el portal.','info')">Descargar</button>
+          <div class="di">${escapeHtml(d.icono||'📄')}</div><h5>${escapeHtml(d.nombre)}</h5>
+          <button class="btn btn-outline btn-sm btn-block" onclick="descargarDocumento('${d.id}')">Descargar</button>
         </div>`).join('')}
     </div>
+    ` : `<div class="empty-state">Aún no hay documentos disponibles.</div>`}
   `;
+}
+async function descargarDocumento(id){
+  const d = state.documentos.find(x=>x.id===id);
+  if(!d) return;
+  if(d.externalUrl){
+    window.open(d.externalUrl, '_blank', 'noopener,noreferrer');
+    return;
+  }
+  const { data, error } = await sb.storage.from('documentos').createSignedUrl(d.storagePath, 60);
+  if(error){ toast('No se pudo descargar: '+error.message,'error'); return; }
+  window.open(data.signedUrl, '_blank', 'noopener,noreferrer');
+}
+
+/* =========================== RH: DOCUMENTOS GENERALES =========================== */
+function renderDocumentosGenerales(){
+  document.getElementById('view-documentos-rh').innerHTML = `
+    <div class="row-between">
+      <div class="page-head" style="margin-bottom:0;"><h1>Documentos</h1><p>Documentos generales visibles para todos los empleados (ej: manual interno, reglamento).</p></div>
+      <button class="btn btn-primary" onclick="abrirModalDocumentoGeneral()">+ Subir documento</button>
+    </div>
+    <div class="doc-grid" id="docsGeneralesGrid"></div>
+  `;
+  pintarDocumentosGenerales();
+}
+function pintarDocumentosGenerales(){
+  const docs = state.documentos.filter(d=>!d.empleadoId).sort((a,b)=>(a.nombre||'').localeCompare(b.nombre||''));
+  document.getElementById('docsGeneralesGrid').innerHTML = docs.length ? docs.map(d=>`
+    <div class="doc-card">
+      <div class="di">${escapeHtml(d.icono||'📄')}</div><h5>${escapeHtml(d.nombre)}</h5>
+      <button class="btn btn-outline btn-sm btn-block" onclick="descargarDocumento('${d.id}')">Descargar</button>
+      <button class="btn btn-danger btn-sm btn-block" style="margin-top:6px;" onclick="eliminarDocumentoGeneral('${d.id}')">Eliminar</button>
+    </div>
+  `).join('') : `<div class="empty-state">Aún no hay documentos generales. Súbelos para que todos los empleados los vean en "Mis documentos".</div>`;
+}
+function abrirModalDocumentoGeneral(){
+  openModal(`
+    <h3>Nuevo documento general</h3>
+    <div class="field"><label>Ícono (un emoji, opcional)</label><input type="text" id="docIcono" value="📄" maxlength="2"></div>
+    <div class="field"><label>Nombre a mostrar</label><input type="text" id="docNombre" placeholder="Ej: Manual interno de trabajo"></div>
+    <div class="field">
+      <label>Archivo (máximo 15 MB)</label>
+      <input type="file" id="docArchivo" onchange="checkDocArchivoSize(this)">
+      <div id="docArchivoWarning" style="font-size:11.5px;color:var(--red);margin-top:6px;display:none;"></div>
+    </div>
+    <div class="field">
+      <label>O pega un enlace <span style="color:var(--gray);font-weight:400;">(para archivos de más de 15 MB: súbelo a Google Drive, OneDrive, etc. con acceso "cualquiera con el link" y pega aquí esa dirección)</span></label>
+      <input type="text" id="docUrl" placeholder="https://drive.google.com/...">
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-outline" onclick="closeModal()">Cancelar</button>
+      <button class="btn btn-primary" onclick="guardarDocumentoGeneral()">Subir</button>
+    </div>
+  `);
+}
+function checkDocArchivoSize(inputEl){
+  const file = inputEl.files[0];
+  const warn = document.getElementById('docArchivoWarning');
+  if(!file){ warn.style.display='none'; return; }
+  if(file.size > 15*1024*1024){
+    warn.textContent = `Este archivo pesa ${(file.size/1024/1024).toFixed(1)} MB, supera el límite de 15 MB. Súbelo a una nube y pega el enlace abajo en su lugar.`;
+    warn.style.display = 'block';
+    inputEl.value = '';
+  } else {
+    warn.style.display = 'none';
+  }
+}
+async function guardarDocumentoGeneral(){
+  const icono = document.getElementById('docIcono').value.trim() || '📄';
+  const nombre = document.getElementById('docNombre').value.trim();
+  const file = document.getElementById('docArchivo').files[0];
+  const url = document.getElementById('docUrl').value.trim();
+  if(!nombre){ toast('Escribe un nombre para el documento.','error'); return; }
+  if(!file && !url){ toast('Selecciona un archivo o pega un enlace.','error'); return; }
+  if(file && file.size > 15*1024*1024){ toast('El archivo supera 15 MB. Súbelo a una nube y pega el enlace en su lugar.','error'); return; }
+
+  const insertData = { empleado_id: null, nombre, icono, subido_por: currentUser.nombre };
+  if(file){
+    const path = `general/${Date.now()}_${file.name}`;
+    const { error: upErr } = await sb.storage.from('documentos').upload(path, file);
+    if(upErr){ toast('No se pudo subir el archivo: '+upErr.message,'error'); return; }
+    insertData.storage_path = path;
+    insertData.tipo_archivo = file.type;
+    insertData.tamano_bytes = file.size;
+  } else {
+    insertData.external_url = url;
+  }
+
+  const { data, error } = await sb.from('documentos').insert(insertData).select().single();
+  if(error){ toast('No se pudo guardar: '+error.message,'error'); return; }
+  state.documentos.push({
+    id:data.id, empleadoId:null, nombre:data.nombre, icono:data.icono, storagePath:data.storage_path,
+    externalUrl:data.external_url, tipoArchivo:data.tipo_archivo, tamanoBytes:data.tamano_bytes, subidoPor:data.subido_por, createdAt:data.created_at
+  });
+  toast('Documento agregado.');
+  closeModal();
+  pintarDocumentosGenerales();
+}
+async function eliminarDocumentoGeneral(id){
+  if(!confirm('¿Eliminar este documento?')) return;
+  const d = state.documentos.find(x=>x.id===id);
+  if(!d) return;
+  if(d.storagePath) await sb.storage.from('documentos').remove([d.storagePath]);
+  const { error } = await sb.from('documentos').delete().eq('id', id);
+  if(error){ toast('No se pudo eliminar: '+error.message,'error'); return; }
+  state.documentos = state.documentos.filter(x=>x.id!==id);
+  toast('Documento eliminado.');
+  pintarDocumentosGenerales();
 }
 
 
@@ -1647,6 +1761,7 @@ function renderRHInicio(){
       <div class="hero-actions">
         <button class="btn btn-primary" onclick="showView('empleados')">Ver empleados</button>
         <button class="btn btn-outline" onclick="showView('solicitudes')">📄 Gestionar certificados</button>
+        <button class="btn btn-outline" onclick="descargarBackupGeneral()">⬇ Copia de seguridad</button>
       </div>
     </div>
 
@@ -1832,7 +1947,7 @@ function xlsxBuildZip(files){
   ));
   return xlsxConcatBytes([...localParts, centralDirBytes, eocd]);
 }
-function descargarXLSX(headers, rows, filename, sheetName){
+function buildXLSXBytes(headers, rows, sheetName){
   sheetName = sheetName || 'Hoja1';
   const enc = new TextEncoder();
   const contentTypes = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>`;
@@ -1849,7 +1964,10 @@ function descargarXLSX(headers, rows, filename, sheetName){
     {name:'xl/styles.xml', data: enc.encode(stylesXml)},
     {name:'xl/worksheets/sheet1.xml', data: enc.encode(sheetXml)},
   ];
-  const zipBytes = xlsxBuildZip(files);
+  return xlsxBuildZip(files);
+}
+function descargarXLSX(headers, rows, filename, sheetName){
+  const zipBytes = buildXLSXBytes(headers, rows, sheetName);
   const blob = new Blob([zipBytes], {type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
   a.download = filename+'_'+todayISO()+'.xlsx'; a.click();
@@ -1924,6 +2042,70 @@ function descargarXLSRegistro(){
       r.estado||'', r.observacion||'', r.adjuntoNombre||''];
   });
   descargarXLSX(headers, rows, 'registro_estados_sinugravas', 'Registro de estado');
+}
+function sanitizeNombreArchivo(s){
+  return String(s||'').replace(/[\\/:*?"<>|]/g, '-').trim() || 'archivo';
+}
+async function descargarBackupGeneral(){
+  showLoader('Generando copia de seguridad...');
+  try{
+    const usersPorCedula = state.users.slice().sort((a,b)=>(a.cedula||'').localeCompare(b.cedula||''));
+
+    const headersEmp = ['Proyecto/Ubicación','Nombre completo','Cédula','Vehículo asignado','Fecha de ingreso','Fecha de retiro','Motivo de retiro','Estado','Género','Fecha de nacimiento','Edad','Nivel de escolaridad','Dirección','Celular','Cargo','Municipio de trabajo','Departamento','Horas laborales','Salario','Horas extras','EPS','AFP','ARL','Nivel de riesgo','Correo','Notas'];
+    const rowsEmp = usersPorCedula.map(u=>[
+      u.proyecto||'', u.nombre, u.cedula, u.vehiculo||'',
+      u.fechaIngreso||'', u.fechaRetiro||'', u.motivoRetiro||'', u.estado||'',
+      u.genero||'', u.fechaNacimiento||'', calcularEdad(u.fechaNacimiento), u.escolaridad||'',
+      u.direccion||'', u.telefono||'', u.cargo||'', u.municipio||'', u.departamento||'',
+      u.horasLaborales||'', u.salario||'', u.horasExtras||'',
+      u.eps||'', u.afp||'', u.arl||'', u.nivelRiesgo||'', u.correo||'', u.notas||''
+    ]);
+    const empleadosXlsxBytes = buildXLSXBytes(headersEmp, rowsEmp, 'Empleados');
+
+    const headersReg = ['Empleado','Cédula','Reportado el','Desde','Hasta','Hora inicio','Hora fin','Estado','Observación','Adjunto'];
+    const rowsReg = state.disponibilidad.slice().map(r=>{
+      const u = state.users.find(x=>x.id===r.usuarioId);
+      return { cedula: u?u.cedula:'', fila:[u?u.nombre:'--', u?u.cedula:'--', fmtDateTime(r.creadoEn), r.fechaInicio||r.fecha, r.fechaFin||r.fecha, r.horaInicio||'', r.horaFin||'', r.estado||'', r.observacion||'', r.adjuntoNombre||''] };
+    }).sort((a,b)=>(a.cedula||'').localeCompare(b.cedula||'')).map(x=>x.fila);
+    const registroXlsxBytes = buildXLSXBytes(headersReg, rowsReg, 'Registro de estado');
+
+    const zipFiles = [
+      { name: 'empleados.xlsx', data: empleadosXlsxBytes },
+      { name: 'registro_estados.xlsx', data: registroXlsxBytes },
+    ];
+
+    const privados = state.documentos
+      .filter(d=>d.empleadoId)
+      .map(d=>({ doc:d, u: state.users.find(x=>x.id===d.empleadoId) }))
+      .sort((a,b)=>(a.u?a.u.cedula:'').localeCompare(b.u?b.u.cedula:''));
+
+    for(const { doc, u } of privados){
+      const carpeta = sanitizeNombreArchivo(`${u?u.cedula:'sin_cedula'} - ${u?u.nombre:'desconocido'}`);
+      if(doc.storagePath){
+        const { data, error } = await sb.storage.from('documentos').download(doc.storagePath);
+        if(!error && data){
+          const bytes = new Uint8Array(await data.arrayBuffer());
+          zipFiles.push({ name: `adjuntos/${carpeta}/${sanitizeNombreArchivo(doc.nombre)}`, data: bytes });
+        }
+      } else if(doc.externalUrl){
+        const enc = new TextEncoder();
+        const contenido = `Enlace externo: ${doc.nombre}\n${doc.externalUrl}\n`;
+        zipFiles.push({ name: `adjuntos/${carpeta}/ENLACE - ${sanitizeNombreArchivo(doc.nombre)}.txt`, data: enc.encode(contenido) });
+      }
+    }
+
+    const zipBytes = xlsxBuildZip(zipFiles);
+    const blob = new Blob([zipBytes], {type:'application/zip'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `backup_sinugravas_${todayISO()}.zip`;
+    a.click();
+    toast('Copia de seguridad generada.');
+  } catch(e){
+    toast('No se pudo generar la copia de seguridad: '+(e && e.message ? e.message : e), 'error');
+  } finally {
+    hideLoader();
+  }
 }
 
 /* =========================== RH: EMPLEADOS =========================== */
@@ -2005,6 +2187,7 @@ function descargarXLSEmpleados(){
 function verEmpleado(id){
   const u = state.users.find(x=>x.id===id);
   const records = state.disponibilidad.filter(d=>d.usuarioId===id).sort((a,b)=>b.fecha.localeCompare(a.fecha)).slice(0,8);
+  const docs = state.documentos.filter(d=>d.empleadoId===id).sort((a,b)=>(b.createdAt||'').localeCompare(a.createdAt||''));
   openModal(`
     <h3>${escapeHtml(u.nombre)}</h3>
     <div class="profile-head">
@@ -2031,12 +2214,59 @@ function verEmpleado(id){
       <thead><tr><th>Fecha</th><th>Horario</th><th>Estado</th></tr></thead>
       <tbody>${records.length? records.map(r=>`<tr><td>${fmtDate(r.fecha)}</td><td>${r.horaInicio}-${r.horaFin}</td><td>${badge(r.estado)}</td></tr>`).join('') : `<tr><td colspan="3"><div class="empty-state">Sin registros.</div></td></tr>`}</tbody>
     </table></div>
+    <h4 class="section-sub">Documentos privados <span style="font-size:11px;font-weight:500;color:var(--gray);">(${docs.length} · el empleado no los ve)</span></h4>
+    <div>
+      ${docs.length ? docs.map(d=>`
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);">
+          <div style="display:flex;align-items:center;gap:8px;font-size:12.5px;"><span>📄</span>${escapeHtml(d.nombre)}</div>
+          <div style="display:flex;gap:6px;">
+            <button class="btn btn-outline btn-sm" onclick="descargarDocumento('${d.id}')">Descargar</button>
+            <button class="btn btn-danger btn-sm" onclick="eliminarDocumentoEmpleado('${d.id}','${id}')">Eliminar</button>
+          </div>
+        </div>
+      `).join('') : `<div class="empty-state">Sin documentos subidos.</div>`}
+    </div>
+    <div class="field" style="margin-top:10px;">
+      <label class="btn btn-outline btn-sm" style="cursor:pointer;">📎 Subir documento<input type="file" style="display:none" onchange="subirDocumentoEmpleado('${id}', this)"></label>
+      <span id="docUploadStatus" style="font-size:11.5px;color:var(--gray);margin-left:8px;"></span>
+    </div>
     <div class="modal-actions">
       <button class="btn btn-outline" onclick="closeModal();showView('usuarios');abrirModalAcceso(${u.authUserId?`'${u.id}'`:`null,'${u.id}'`})">Gestionar acceso</button>
       <button class="btn btn-outline" onclick="closeModal()">Cerrar</button>
       <button class="btn btn-primary" onclick="abrirModalEmpleado('${u.id}')">Editar información</button>
     </div>
   `, true);
+}
+async function subirDocumentoEmpleado(empleadoId, inputEl){
+  const file = inputEl.files && inputEl.files[0];
+  if(!file) return;
+  const statusEl = document.getElementById('docUploadStatus');
+  if(statusEl) statusEl.textContent = 'Subiendo...';
+  const path = `${empleadoId}/${Date.now()}_${file.name}`;
+  const { error: upErr } = await sb.storage.from('documentos').upload(path, file);
+  if(upErr){ toast('No se pudo subir el archivo: '+upErr.message,'error'); if(statusEl) statusEl.textContent=''; return; }
+  const { data, error } = await sb.from('documentos').insert({
+    empleado_id: empleadoId, nombre: file.name, storage_path: path,
+    tipo_archivo: file.type, tamano_bytes: file.size, subido_por: currentUser.nombre
+  }).select().single();
+  if(error){ toast('No se pudo guardar el registro: '+error.message,'error'); if(statusEl) statusEl.textContent=''; return; }
+  state.documentos.push({
+    id:data.id, empleadoId:data.empleado_id, nombre:data.nombre, storagePath:data.storage_path,
+    tipoArchivo:data.tipo_archivo, tamanoBytes:data.tamano_bytes, subidoPor:data.subido_por, createdAt:data.created_at
+  });
+  toast('Documento subido correctamente.');
+  verEmpleado(empleadoId);
+}
+async function eliminarDocumentoEmpleado(id, empleadoId){
+  if(!confirm('¿Eliminar este documento?')) return;
+  const d = state.documentos.find(x=>x.id===id);
+  if(!d) return;
+  await sb.storage.from('documentos').remove([d.storagePath]);
+  const { error } = await sb.from('documentos').delete().eq('id', id);
+  if(error){ toast('No se pudo eliminar: '+error.message,'error'); return; }
+  state.documentos = state.documentos.filter(x=>x.id!==id);
+  toast('Documento eliminado.');
+  verEmpleado(empleadoId);
 }
 function abrirModalEmpleado(id){
   const u = id ? state.users.find(x=>x.id===id) : null;
